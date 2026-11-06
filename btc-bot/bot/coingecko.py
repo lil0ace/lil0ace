@@ -70,13 +70,15 @@ class CoinGeckoClient:
                     retry_after = resp.headers.get("retry-after")
                     wait = float(retry_after) if retry_after and retry_after.isdigit() else delay
                     log.warning("CoinGecko HTTP %s, retrying in %.0fs", resp.status_code, wait)
-                    self.sleep(wait)
+                    if self.sleep(wait):  # stop.wait() returns True once a stop was requested
+                        raise CoinGeckoError("stopped")
                     delay = min(delay * 2, 60)
                     continue
                 if resp.status_code >= 400:
                     raise CoinGeckoError(f"{path}: HTTP {resp.status_code}: {resp.text[:200]}")
                 return resp.json()
-            self.sleep(delay)
+            if self.sleep(delay):
+                raise CoinGeckoError("stopped")
             delay = min(delay * 2, 60)
         raise CoinGeckoError(f"request to {path} failed")  # pragma: no cover
 

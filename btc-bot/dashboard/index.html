@@ -9,11 +9,13 @@
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #6b7280; --border: #e3e6eb;
     --price: #3b82f6; --fast: #f59e0b; --slow: #8b5cf6; --up: #16a34a; --down: #dc2626; --equity: #0ea5e9;
+    --close: #6b7280; --bull-bg: rgba(22, 163, 74, 0.07); --bear-bg: rgba(220, 38, 38, 0.07);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #0f1115; --panel: #171a21; --text: #e6e8ec; --muted: #9aa3b2; --border: #2a2f3a;
       --price: #60a5fa; --fast: #fbbf24; --slow: #a78bfa; --up: #22c55e; --down: #f87171; --equity: #38bdf8;
+      --close: #9aa3b2; --bull-bg: rgba(34, 197, 94, 0.09); --bear-bg: rgba(248, 113, 113, 0.09);
     }
   }
   * { box-sizing: border-box; }
@@ -38,7 +40,7 @@
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+  th:nth-child(-n+4), td:nth-child(-n+4) { text-align: left; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; }
   #error { color: var(--down); }
 </style>
@@ -54,6 +56,7 @@
   <p class="note">Nur Papiergeld &amp; simulierte Ergebnisse – keine echten Orders, keine Anlageberatung. <span id="meta"></span> <span id="error"></span></p>
 
   <section class="tiles">
+    <div class="tile"><div class="k" id="trendLabel">4h-Trend</div><div class="v" id="trend">–</div></div>
     <div class="tile"><div class="k">Equity</div><div class="v" id="equity">–</div></div>
     <div class="tile"><div class="k">Rendite</div><div class="v" id="ret">–</div></div>
     <div class="tile"><div class="k">Buy &amp; Hold</div><div class="v" id="bh">–</div></div>
@@ -65,6 +68,7 @@
 
   <section class="panel">
     <h2 id="priceTitle">Preis &amp; gleitende Durchschnitte</h2>
+    <p class="note">Hintergrund: grün = 4h bullisch (nur Longs), rot = 4h bärisch (nur Shorts).</p>
     <div class="chart"><canvas id="priceChart" aria-label="Preischart mit gleitenden Durchschnitten und Trades"></canvas></div>
   </section>
   <section class="panel">
@@ -75,7 +79,7 @@
     <h2>Trades</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Zeit</th><th>Seite</th><th>Grund</th><th>Preis</th><th>Menge</th><th>Gebühr</th><th>P&amp;L</th></tr></thead>
+        <thead><tr><th>Zeit</th><th>Aktion</th><th>Grund</th><th>Trend</th><th>Preis</th><th>Menge</th><th>Gebühr</th><th>P&amp;L</th></tr></thead>
         <tbody id="trades"></tbody>
       </table>
     </div>
@@ -91,6 +95,28 @@ const fmtTime = t => new Date(t * 1000).toLocaleString('de-DE', { month: '2-digi
 const params = new URLSearchParams(location.search);
 let current = params.get('state') || 'paper';
 let priceChart, equityChart;
+let trendBands = [];
+const ACTION = { buy: 'Long eröffnen', sell: 'Long schließen', short: 'Short eröffnen', cover: 'Short schließen' };
+const TREND = { bull: 'bullisch', bear: 'bärisch' };
+
+// shades the price chart background by the higher-timeframe trend of each candle
+const trendBackground = {
+  id: 'trendBackground',
+  beforeDatasetsDraw(chart) {
+    if (!trendBands.length) return;
+    const { ctx, chartArea: a, scales: { x } } = chart;
+    const n = trendBands.length, step = n > 1 ? x.getPixelForValue(1) - x.getPixelForValue(0) : a.width;
+    ctx.save();
+    for (let i = 0; i < n; i++) {
+      const tr = trendBands[i];
+      if (!tr) continue;
+      ctx.fillStyle = tr === 'bull' ? css('--bull-bg') : css('--bear-bg');
+      const left = Math.max(a.left, x.getPixelForValue(i) - step / 2);
+      ctx.fillRect(left, a.top, Math.min(step + 1, a.right - left), a.bottom - a.top);
+    }
+    ctx.restore();
+  },
+};
 
 function makeCharts() {
   const grid = css('--border'), muted = css('--muted');
@@ -98,12 +124,13 @@ function makeCharts() {
                    y: { ticks: { color: muted }, grid: { color: grid } } };
   const common = { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
                    plugins: { legend: { labels: { color: muted, boxWidth: 12 } } }, scales };
-  priceChart = new Chart(document.getElementById('priceChart'), { type: 'line', options: common, data: { labels: [], datasets: [
+  priceChart = new Chart(document.getElementById('priceChart'), { type: 'line', options: common, plugins: [trendBackground], data: { labels: [], datasets: [
     { label: 'Preis', data: [], borderColor: css('--price'), borderWidth: 1.5, pointRadius: 0 },
     { label: 'Schneller MA', data: [], borderColor: css('--fast'), borderWidth: 1.5, pointRadius: 0 },
     { label: 'Langsamer MA', data: [], borderColor: css('--slow'), borderWidth: 1.5, pointRadius: 0 },
-    { label: 'Kauf', data: [], showLine: false, pointStyle: 'triangle', pointRadius: 7, backgroundColor: css('--up'), borderColor: css('--up') },
-    { label: 'Verkauf', data: [], showLine: false, pointStyle: 'triangle', rotation: 180, pointRadius: 7, backgroundColor: css('--down'), borderColor: css('--down') },
+    { label: 'Long', data: [], showLine: false, pointStyle: 'triangle', pointRadius: 7, backgroundColor: css('--up'), borderColor: css('--up') },
+    { label: 'Short', data: [], showLine: false, pointStyle: 'triangle', rotation: 180, pointRadius: 7, backgroundColor: css('--down'), borderColor: css('--down') },
+    { label: 'Glattstellen', data: [], showLine: false, pointStyle: 'crossRot', pointRadius: 7, borderWidth: 2, backgroundColor: css('--close'), borderColor: css('--close') },
   ] } });
   equityChart = new Chart(document.getElementById('equityChart'), { type: 'line', options: common, data: { labels: [], datasets: [
     { label: 'Equity', data: [], borderColor: css('--equity'), backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0 },
@@ -116,9 +143,16 @@ function render(s) {
   const st = document.getElementById('status');
   st.textContent = m.halted ? 'Kill-Switch' : (s.status || '–');
   st.className = 'badge ' + (m.halted || s.last_error ? 'bad' : (s.status === 'running' || s.status === 'finished' ? 'ok' : ''));
-  const sc = s.strategy || {};
+  const sc = s.strategy || {}, tf = s.trend_filter || {};
+  const tfName = tf.interval ? (tf.interval >= 3600 ? (tf.interval / 3600) + 'h' : (tf.interval / 60) + 'min') : '';
+  const candleName = s.candle_seconds >= 60 ? (s.candle_seconds / 60) + 'min' : s.candle_seconds + 's';
   document.getElementById('priceTitle').textContent =
-    `${(s.coin || '').toUpperCase()}/${(s.vs || '').toUpperCase()} · ${sc.kind?.toUpperCase()} ${sc.fast}/${sc.slow} · ${s.candle_seconds}s-Kerzen`;
+    `${(s.coin || '').toUpperCase()}/${(s.vs || '').toUpperCase()} · ${candleName}-Kerzen ${sc.kind?.toUpperCase()} ${sc.fast}/${sc.slow}` +
+    (tf.enabled ? ` · Trendfilter ${tfName} ${tf.kind?.toUpperCase()} ${tf.fast}/${tf.slow}${tf.allow_short ? '' : ' (ohne Shorts)'}` : ' · ohne Trendfilter');
+  document.getElementById('trendLabel').textContent = (tfName || '4h') + '-Trend';
+  const trEl = document.getElementById('trend');
+  trEl.textContent = tf.enabled ? (TREND[m.trend] || 'unbekannt') : 'aus';
+  cls(trEl, m.trend === 'bull' ? 1 : m.trend === 'bear' ? -1 : 0);
   const meta = [];
   if (s.source) meta.push('Quelle: ' + (s.source === 'ws' ? 'CoinGecko WebSocket' : 'CoinGecko REST'));
   if (s.updated_at) meta.push('aktualisiert ' + fmtTime(s.updated_at));
@@ -132,22 +166,26 @@ function render(s) {
   const dd = document.getElementById('dd'); dd.textContent = m.max_drawdown_pct ? pct(-m.max_drawdown_pct) : '0.00 %'; cls(dd, -(m.max_drawdown_pct || 0));
   document.getElementById('wr').textContent = `${m.round_trips ?? 0} / ${m.win_rate == null ? '–' : Math.round(m.win_rate * 100) + ' %'}`;
   document.getElementById('price').textContent = usd(s.last_price);
-  document.getElementById('pos').textContent = m.position_qty > 0 ? `${m.position_qty.toFixed(5)} BTC` : 'flat';
+  const pos = document.getElementById('pos');
+  pos.textContent = m.position_qty > 0 ? `${m.position_side === 'short' ? 'Short' : 'Long'} ${m.position_qty.toFixed(4)}` : 'flat';
+  cls(pos, m.position_qty > 0 ? (m.position_side === 'short' ? -1 : 1) : 0);
 
   const candles = (s.candles || []).slice();
   if (s.open_candle && (!candles.length || s.open_candle.t > candles[candles.length - 1].t)) candles.push({ ...s.open_candle, fast: null, slow: null });
   const idx = new Map(candles.map((c, i) => [c.t, i]));
-  const buys = new Array(candles.length).fill(null), sells = new Array(candles.length).fill(null);
+  const longs = new Array(candles.length).fill(null), shorts = longs.slice(), closes = longs.slice();
   for (const t of s.trades || []) {
     const i = idx.get(t.time); if (i == null) continue;
-    (t.side === 'buy' ? buys : sells)[i] = t.price;
+    (t.side === 'buy' ? longs : t.side === 'short' ? shorts : closes)[i] = t.price;
   }
+  trendBands = candles.map(c => c.trend || null);
   priceChart.data.labels = candles.map(c => fmtTime(c.t));
   priceChart.data.datasets[0].data = candles.map(c => c.c);
   priceChart.data.datasets[1].data = candles.map(c => c.fast);
   priceChart.data.datasets[2].data = candles.map(c => c.slow);
-  priceChart.data.datasets[3].data = buys;
-  priceChart.data.datasets[4].data = sells;
+  priceChart.data.datasets[3].data = longs;
+  priceChart.data.datasets[4].data = shorts;
+  priceChart.data.datasets[5].data = closes;
   priceChart.update();
 
   const eq = s.equity || [];
@@ -156,10 +194,10 @@ function render(s) {
   equityChart.update();
 
   const rows = (s.trades || []).slice().reverse().map(t => `<tr>
-    <td>${fmtTime(t.time)}</td><td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'Kauf' : 'Verkauf'}</td><td>${t.reason}</td>
+    <td>${fmtTime(t.time)}</td><td class="${t.side === 'buy' ? 'up' : t.side === 'short' ? 'down' : ''}">${ACTION[t.side] || t.side}</td><td>${t.reason}</td><td>${TREND[t.trend] || '–'}</td>
     <td>${usd(t.price)}</td><td>${t.qty.toFixed(6)}</td><td>${usd(t.fee)}</td>
     <td class="${(t.pnl || 0) > 0 ? 'up' : (t.pnl || 0) < 0 ? 'down' : ''}">${t.pnl == null ? '' : usd(t.pnl) + ' (' + pct(t.pnl_pct) + ')'}</td></tr>`);
-  document.getElementById('trades').innerHTML = rows.join('') || '<tr><td colspan="7">Noch keine Trades.</td></tr>';
+  document.getElementById('trades').innerHTML = rows.join('') || '<tr><td colspan="8">Noch keine Trades.</td></tr>';
 }
 
 async function loadStates() {

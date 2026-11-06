@@ -8,9 +8,9 @@ import os
 import sys
 from pathlib import Path
 
-from .backtest import fetch_history, run_backtest, sweep, write_trades_csv
+from .backtest import fetch_history, fetch_trend_history, run_backtest, sweep, write_trades_csv
 from .coingecko import CoinGeckoClient
-from .config import MarketConfig, RiskConfig, StrategyConfig
+from .config import MarketConfig, RiskConfig, StrategyConfig, TrendConfig
 from .engine import TradingEngine
 from .state import write_json
 
@@ -27,6 +27,13 @@ def _common(p: argparse.ArgumentParser) -> None:
     g.add_argument("--fast", type=int, default=9, help="fast moving average length (candles)")
     g.add_argument("--slow", type=int, default=21, help="slow moving average length (candles)")
     g.add_argument("--ma", choices=["sma", "ema"], default="sma")
+    t = p.add_argument_group("higher-timeframe trend filter (default: 4h EMA 9/21)")
+    t.add_argument("--trend-interval", type=int, default=4 * 3600, help="trend candle length in seconds (14400 = 4h)")
+    t.add_argument("--trend-fast", type=int, default=9)
+    t.add_argument("--trend-slow", type=int, default=21)
+    t.add_argument("--trend-ma", choices=["sma", "ema"], default="ema")
+    t.add_argument("--no-trend", action="store_true", help="disable the filter: long-only on every golden cross")
+    t.add_argument("--no-short", action="store_true", help="never open shorts (stay flat in a bearish trend)")
     r = p.add_argument_group("paper account & risk")
     r.add_argument("--cash", type=float, default=10_000.0, help="starting paper cash")
     r.add_argument("--fee", type=float, default=0.1, help="fee per fill in %%")
@@ -40,8 +47,11 @@ def _common(p: argparse.ArgumentParser) -> None:
     m.add_argument("--vs", default="usd", help="quote currency")
 
 
-def _configs(a) -> tuple[StrategyConfig, RiskConfig, MarketConfig]:
+def _configs(a) -> tuple[StrategyConfig, RiskConfig, MarketConfig, TrendConfig]:
     s = StrategyConfig(fast=a.fast, slow=a.slow, kind=a.ma)
+    tr = TrendConfig(enabled=not a.no_trend, interval=a.trend_interval, fast=a.trend_fast,
+                     slow=a.trend_slow, kind=a.trend_ma, allow_short=not a.no_short)
+    tr.validate()
     r = RiskConfig(
         starting_cash=a.cash, fee_rate=a.fee / 100, slippage=a.slippage / 100,
         position_fraction=a.fraction / 100, stop_loss_pct=a.stop_loss,
@@ -49,7 +59,17 @@ def _configs(a) -> tuple[StrategyConfig, RiskConfig, MarketConfig]:
     )
     s.validate()
     r.validate()
-    return s, r, MarketConfig(coin_id=a.coin, vs_currency=a.vs)
+    return s, r, MarketConfig(coin_id=a.coin, vs_currency=a.vs), tr
+
+
+def _describe(s: StrategyConfig, tr: TrendConfig) -> str:
+    base = f"{s.kind.upper()} {s.fast}/{s.slow}"
+    if not tr.enabled:
+        return base + " crossover, long only, no trend filter"
+    h = tr.interval / 3600
+    tf = f"{h:g}h" if h >= 1 else f"{tr.interval // 60}min"
+    shorts = "long+short" if tr.allow_short else "long only"
+    return f"{base} crossover, {tf} {tr.kind.upper()} {tr.fast}/{tr.slow} trend filter, {shorts}"
 
 
 def _fmt_pct(v) -> str:
@@ -57,16 +77,17 @@ def _fmt_pct(v) -> str:
 
 
 def cmd_backtest(a) -> int:
-    s, r, m = _configs(a)
+    s, r, m, tr = _configs(a)
     client = CoinGeckoClient()
     candles = fetch_history(client, m, a.days, a.interval)
+    trend_candles = fetch_trend_history(client, m, tr, a.days) if tr.enabled else None
     if len(candles) <= s.slow:
         print(f"only {len(candles)} candles - need more than slow={s.slow}. Use more --days or a shorter --interval.")
         return 1
     print(f"{len(candles)} candles of {a.interval}s for {m.coin_id}/{m.vs_currency} ({a.days} days)")
 
     if a.sweep:
-        rows = sweep(candles, s, r, [5, 7, 9, 12, 15, 20], [21, 26, 30, 40, 50, 100])
+        rows = sweep(candles, s, r, [5, 7, 9, 12, 15, 20], [21, 26, 30, 40, 50, 100], tr, trend_candles, a.interval)
         print(f"\n{'fast':>4} {'slow':>4} {'return':>9} {'buy&hold':>9} {'maxDD':>8} {'trades':>6} {'win%':>6}")
         for row in rows:
             wr = "-" if row["win_rate"] is None else f"{row['win_rate'] * 100:.0f}"
@@ -75,17 +96,19 @@ def cmd_backtest(a) -> int:
                   f"{row['round_trips']:>6} {wr:>6}")
         print("\nTip: pick a region where neighbouring settings also do well, not the single best row (overfitting).")
 
-    engine = run_backtest(candles, s, r)
+    engine = run_backtest(candles, s, r, tr, trend_candles, a.interval)
     mt = engine.metrics()
-    print(f"\nMA crossover {s.kind.upper()} {s.fast}/{s.slow}")
+    print(f"\n{_describe(s, tr)}")
+    if tr.enabled:
+        print(f"  trend now      {mt['trend'] or 'unknown'}")
     print(f"  start equity   {r.starting_cash:,.2f}")
     print(f"  end equity     {mt['equity']:,.2f}  ({_fmt_pct(mt['total_return_pct'])})")
     print(f"  buy & hold     {_fmt_pct(mt['buy_hold_return_pct'])}")
     print(f"  max drawdown   {_fmt_pct(-mt['max_drawdown_pct'])}")
-    print(f"  round trips    {mt['round_trips']}  win rate {'-' if mt['win_rate'] is None else format(mt['win_rate'] * 100, '.0f') + '%'}")
+    print(f"  round trips    {mt['round_trips']} ({mt['long_trades']} long / {mt['short_trades']} short)  win rate {'-' if mt['win_rate'] is None else format(mt['win_rate'] * 100, '.0f') + '%'}")
     print(f"  fees paid      {mt['total_fees']:,.2f}")
     if engine.broker.in_position:
-        print(f"  open position  {engine.broker.qty:.6f} @ {engine.broker.entry_price:,.2f} (marked to market)")
+        print(f"  open {engine.broker.side:<9} {engine.broker.qty:.6f} @ {engine.broker.entry_price:,.2f} (marked to market)")
     if mt["halted"]:
         print(f"  KILL SWITCH    {mt['halt_reason']}")
 
@@ -104,12 +127,12 @@ def cmd_backtest(a) -> int:
 def cmd_paper(a) -> int:
     from .live import PaperTrader, run_rest, run_ws
 
-    s, r, m = _configs(a)
+    s, r, m, tr = _configs(a)
     client = CoinGeckoClient()
-    candle_seconds = a.candle_seconds or (1 if a.source == "ws" else 60)
+    candle_seconds = a.candle_seconds
     if a.source == "rest" and candle_seconds < a.poll:
         print(f"warning: candles ({candle_seconds}s) shorter than poll interval ({a.poll}s) -> many flat candles")
-    engine = TradingEngine(s, r)
+    engine = TradingEngine(s, r, trend_cfg=tr)
     name = a.name
     trader = PaperTrader(engine, candle_seconds, m, DATA_DIR / f"{name}_state.json",
                          DATA_DIR / f"{name}_account.json", a.source)
@@ -128,7 +151,7 @@ def cmd_paper(a) -> int:
         print(f"dashboard: http://{a.host}:{a.port}/?state={name}")
 
     print(f"paper trading {m.coin_id}/{m.vs_currency} via {a.source}, {candle_seconds}s candles, "
-          f"{s.kind.upper()} {s.fast}/{s.slow}. Simulated only - no real orders. Ctrl+C to stop.")
+          f"{_describe(s, tr)}. Simulated only - no real orders. Ctrl+C to stop.")
     if a.source == "ws":
         key = os.getenv("COINGECKO_API_KEY")
         if not key:
@@ -155,15 +178,15 @@ def main(argv: list[str] | None = None) -> int:
 
     b = sub.add_parser("backtest", help="test the strategy on CoinGecko history")
     _common(b)
-    b.add_argument("--days", type=float, default=7, help="history length (1 day = 5-min data, 2-90 = hourly)")
-    b.add_argument("--interval", type=int, default=3600, help="candle length in seconds")
+    b.add_argument("--days", type=float, default=1, help="history length (1 day = 5-min data, 2-90 = hourly)")
+    b.add_argument("--interval", type=int, default=300, help="candle length in seconds (300 = 5 min)")
     b.add_argument("--sweep", action="store_true", help="also test a grid of fast/slow settings")
     b.add_argument("--dashboard", action="store_true", help="open the dashboard afterwards")
 
     pp = sub.add_parser("paper", help="forward test on live prices (paper money)")
     _common(pp)
     pp.add_argument("--source", choices=["rest", "ws"], default="rest")
-    pp.add_argument("--candle-seconds", type=int, default=None, help="default: 60 (rest) / 1 (ws)")
+    pp.add_argument("--candle-seconds", type=int, default=300, help="signal candle length (300 = 5 min)")
     pp.add_argument("--poll", type=float, default=30.0, help="REST poll interval in seconds")
     pp.add_argument("--name", default="paper", help="name for state/account files")
     pp.add_argument("--reset", action="store_true", help="discard the saved paper account")

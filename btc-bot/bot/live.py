@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import signal
 import threading
@@ -37,6 +38,8 @@ class PaperTrader:
     ) -> None:
         self.engine = engine
         self.agg = CandleAggregator(candle_seconds)
+        tcfg = engine.trend_cfg
+        self.trend_agg = CandleAggregator(tcfg.interval) if tcfg.enabled else None
         self.market = market
         self.state_path = Path(state_path)
         self.account_path = Path(account_path)
@@ -58,23 +61,48 @@ class PaperTrader:
         return True
 
     def warmup(self, client: CoinGeckoClient) -> None:
-        """Prime the moving averages with recent history (only sensible for candles >= 5 min)."""
+        """Prime the moving averages with recent history so trading can start right away."""
+        now = time.time()
+        if self.trend_agg is not None:
+            tcfg = self.engine.trend_cfg
+            days = min(90, max(2, math.ceil((tcfg.slow + 3) * tcfg.interval / 86400) + 1))
+            points = client.market_chart(self.market.coin_id, self.market.vs_currency, days)
+            candles = resample(points, tcfg.interval)
+            for c in candles:
+                if c.start + tcfg.interval <= now:
+                    self.engine.on_trend_candle(c)
+                else:
+                    self.trend_agg.current = c  # the still-running trend candle
+            log.info("trend warm-up: %d candles of %ss, trend now %s",
+                     len(candles), tcfg.interval, self.engine.trend.state or "unknown")
+
         if self.agg.seconds < 300:
             log.info("no warm-up for %ss candles; waiting for %d live candles", self.agg.seconds, self.engine.strategy_cfg.slow)
             return
         days = 1 if self.agg.seconds < 3600 else 30
         points = client.market_chart(self.market.coin_id, self.market.vs_currency, days)
-        candles = resample(points, self.agg.seconds)[:-1]
+        candles = resample(points, self.agg.seconds)
+        n = 0
         for c in candles:
-            self.engine.warmup(c)
-        log.info("warm-up with %d historical candles done", len(candles))
+            if c.start + self.agg.seconds <= now:
+                self.engine.warmup(c)
+                n += 1
+            else:
+                self.agg.current = c
+        log.info("warm-up with %d historical candles done", n)
 
     def on_tick(self, ts: float, price: float) -> None:
         self.ticks += 1
+        if self.trend_agg is not None:
+            for tc in self.trend_agg.add(ts, price):
+                before = self.engine.trend.state
+                self.engine.on_trend_candle(tc)
+                if self.engine.trend.state != before:
+                    log.info("higher-timeframe trend changed: %s -> %s", before, self.engine.trend.state)
         for candle in self.agg.add(ts, price):
             for tr in self.engine.on_candle(candle):
                 pnl = f" pnl={tr.pnl:+.2f}" if tr.pnl is not None else ""
-                log.info("PAPER %s %.6f @ %.2f (%s)%s", tr.side.upper(), tr.qty, tr.price, tr.reason, pnl)
+                log.info("PAPER %s %.6f @ %.2f (%s, trend %s)%s", tr.side.upper(), tr.qty, tr.price, tr.reason, tr.trend, pnl)
             self.save_account()
         self.engine.mark(ts, price)
         self.write_state()
@@ -100,6 +128,7 @@ class PaperTrader:
             started_at=self.started_at,
             updated_at=now,
             open_candle=cur.to_dict() if cur else None,
+            trend_open_candle=self.trend_agg.current.to_dict() if self.trend_agg and self.trend_agg.current else None,
         ))
 
 
