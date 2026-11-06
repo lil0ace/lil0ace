@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC Paper Bot</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #6b7280; --border: #e3e6eb;
+    --price: #3b82f6; --fast: #f59e0b; --slow: #8b5cf6; --up: #16a34a; --down: #dc2626; --equity: #0ea5e9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --panel: #171a21; --text: #e6e8ec; --muted: #9aa3b2; --border: #2a2f3a;
+      --price: #60a5fa; --fast: #fbbf24; --slow: #a78bfa; --up: #22c55e; --down: #f87171; --equity: #38bdf8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.ok { color: var(--up); border-color: var(--up); }
+  .badge.bad { color: var(--down); border-color: var(--down); }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  .note { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .panel h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .chart { position: relative; height: 320px; }
+  .chart.small { height: 200px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  #error { color: var(--down); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>BTC Paper Bot <span id="mode" class="badge">–</span> <span id="status" class="badge">–</span></h1>
+    </div>
+    <label>Ansicht <select id="stateSel"></select></label>
+  </header>
+  <p class="note">Nur Papiergeld &amp; simulierte Ergebnisse – keine echten Orders, keine Anlageberatung. <span id="meta"></span> <span id="error"></span></p>
+
+  <section class="tiles">
+    <div class="tile"><div class="k">Equity</div><div class="v" id="equity">–</div></div>
+    <div class="tile"><div class="k">Rendite</div><div class="v" id="ret">–</div></div>
+    <div class="tile"><div class="k">Buy &amp; Hold</div><div class="v" id="bh">–</div></div>
+    <div class="tile"><div class="k">Max. Drawdown</div><div class="v" id="dd">–</div></div>
+    <div class="tile"><div class="k">Trades / Trefferquote</div><div class="v" id="wr">–</div></div>
+    <div class="tile"><div class="k">Letzter Preis</div><div class="v" id="price">–</div></div>
+    <div class="tile"><div class="k">Position</div><div class="v" id="pos">–</div></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="priceTitle">Preis &amp; gleitende Durchschnitte</h2>
+    <div class="chart"><canvas id="priceChart" aria-label="Preischart mit gleitenden Durchschnitten und Trades"></canvas></div>
+  </section>
+  <section class="panel">
+    <h2>Paper-Equity</h2>
+    <div class="chart small"><canvas id="equityChart" aria-label="Equity-Kurve"></canvas></div>
+  </section>
+  <section class="panel">
+    <h2>Trades</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Zeit</th><th>Seite</th><th>Grund</th><th>Preis</th><th>Menge</th><th>Gebühr</th><th>P&amp;L</th></tr></thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const usd = v => v == null ? '–' : v.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+const pct = v => v == null ? '–' : (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + ' %';
+const cls = (el, v) => { el.classList.toggle('up', v > 0); el.classList.toggle('down', v < 0); };
+const fmtTime = t => new Date(t * 1000).toLocaleString('de-DE', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+const params = new URLSearchParams(location.search);
+let current = params.get('state') || 'paper';
+let priceChart, equityChart;
+
+function makeCharts() {
+  const grid = css('--border'), muted = css('--muted');
+  const scales = { x: { ticks: { color: muted, maxTicksLimit: 8, autoSkip: true }, grid: { color: grid } },
+                   y: { ticks: { color: muted }, grid: { color: grid } } };
+  const common = { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
+                   plugins: { legend: { labels: { color: muted, boxWidth: 12 } } }, scales };
+  priceChart = new Chart(document.getElementById('priceChart'), { type: 'line', options: common, data: { labels: [], datasets: [
+    { label: 'Preis', data: [], borderColor: css('--price'), borderWidth: 1.5, pointRadius: 0 },
+    { label: 'Schneller MA', data: [], borderColor: css('--fast'), borderWidth: 1.5, pointRadius: 0 },
+    { label: 'Langsamer MA', data: [], borderColor: css('--slow'), borderWidth: 1.5, pointRadius: 0 },
+    { label: 'Kauf', data: [], showLine: false, pointStyle: 'triangle', pointRadius: 7, backgroundColor: css('--up'), borderColor: css('--up') },
+    { label: 'Verkauf', data: [], showLine: false, pointStyle: 'triangle', rotation: 180, pointRadius: 7, backgroundColor: css('--down'), borderColor: css('--down') },
+  ] } });
+  equityChart = new Chart(document.getElementById('equityChart'), { type: 'line', options: common, data: { labels: [], datasets: [
+    { label: 'Equity', data: [], borderColor: css('--equity'), backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0 },
+  ] } });
+}
+
+function render(s) {
+  const m = s.metrics || {};
+  document.getElementById('mode').textContent = s.mode === 'backtest' ? 'Backtest' : 'Forward-Test';
+  const st = document.getElementById('status');
+  st.textContent = m.halted ? 'Kill-Switch' : (s.status || '–');
+  st.className = 'badge ' + (m.halted || s.last_error ? 'bad' : (s.status === 'running' || s.status === 'finished' ? 'ok' : ''));
+  const sc = s.strategy || {};
+  document.getElementById('priceTitle').textContent =
+    `${(s.coin || '').toUpperCase()}/${(s.vs || '').toUpperCase()} · ${sc.kind?.toUpperCase()} ${sc.fast}/${sc.slow} · ${s.candle_seconds}s-Kerzen`;
+  const meta = [];
+  if (s.source) meta.push('Quelle: ' + (s.source === 'ws' ? 'CoinGecko WebSocket' : 'CoinGecko REST'));
+  if (s.updated_at) meta.push('aktualisiert ' + fmtTime(s.updated_at));
+  if (m.halt_reason) meta.push('gestoppt: ' + m.halt_reason);
+  document.getElementById('meta').textContent = meta.join(' · ');
+  document.getElementById('error').textContent = s.last_error ? 'Fehler: ' + s.last_error : '';
+
+  document.getElementById('equity').textContent = usd(m.equity);
+  const ret = document.getElementById('ret'); ret.textContent = pct(m.total_return_pct); cls(ret, m.total_return_pct);
+  const bh = document.getElementById('bh'); bh.textContent = pct(m.buy_hold_return_pct); cls(bh, m.buy_hold_return_pct);
+  const dd = document.getElementById('dd'); dd.textContent = m.max_drawdown_pct ? pct(-m.max_drawdown_pct) : '0.00 %'; cls(dd, -(m.max_drawdown_pct || 0));
+  document.getElementById('wr').textContent = `${m.round_trips ?? 0} / ${m.win_rate == null ? '–' : Math.round(m.win_rate * 100) + ' %'}`;
+  document.getElementById('price').textContent = usd(s.last_price);
+  document.getElementById('pos').textContent = m.position_qty > 0 ? `${m.position_qty.toFixed(5)} BTC` : 'flat';
+
+  const candles = (s.candles || []).slice();
+  if (s.open_candle && (!candles.length || s.open_candle.t > candles[candles.length - 1].t)) candles.push({ ...s.open_candle, fast: null, slow: null });
+  const idx = new Map(candles.map((c, i) => [c.t, i]));
+  const buys = new Array(candles.length).fill(null), sells = new Array(candles.length).fill(null);
+  for (const t of s.trades || []) {
+    const i = idx.get(t.time); if (i == null) continue;
+    (t.side === 'buy' ? buys : sells)[i] = t.price;
+  }
+  priceChart.data.labels = candles.map(c => fmtTime(c.t));
+  priceChart.data.datasets[0].data = candles.map(c => c.c);
+  priceChart.data.datasets[1].data = candles.map(c => c.fast);
+  priceChart.data.datasets[2].data = candles.map(c => c.slow);
+  priceChart.data.datasets[3].data = buys;
+  priceChart.data.datasets[4].data = sells;
+  priceChart.update();
+
+  const eq = s.equity || [];
+  equityChart.data.labels = eq.map(p => fmtTime(p.t));
+  equityChart.data.datasets[0].data = eq.map(p => p.v);
+  equityChart.update();
+
+  const rows = (s.trades || []).slice().reverse().map(t => `<tr>
+    <td>${fmtTime(t.time)}</td><td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? 'Kauf' : 'Verkauf'}</td><td>${t.reason}</td>
+    <td>${usd(t.price)}</td><td>${t.qty.toFixed(6)}</td><td>${usd(t.fee)}</td>
+    <td class="${(t.pnl || 0) > 0 ? 'up' : (t.pnl || 0) < 0 ? 'down' : ''}">${t.pnl == null ? '' : usd(t.pnl) + ' (' + pct(t.pnl_pct) + ')'}</td></tr>`);
+  document.getElementById('trades').innerHTML = rows.join('') || '<tr><td colspan="7">Noch keine Trades.</td></tr>';
+}
+
+async function loadStates() {
+  try {
+    const names = await (await fetch('/api/states')).json();
+    if (!names.includes(current) && names.length) current = names[0];
+    const sel = document.getElementById('stateSel');
+    sel.innerHTML = names.map(n => `<option value="${n}" ${n === current ? 'selected' : ''}>${n}</option>`).join('');
+    sel.onchange = () => { current = sel.value; history.replaceState(null, '', '?state=' + current); tick(); };
+  } catch (e) { /* server not ready */ }
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/api/state?name=' + encodeURIComponent(current), { cache: 'no-store' });
+    const s = await r.json();
+    if (!r.ok) { document.getElementById('error').textContent = s.error || 'Fehler'; return; }
+    render(s);
+  } catch (e) {
+    document.getElementById('error').textContent = 'Dashboard-Server nicht erreichbar';
+  }
+}
+
+makeCharts();
+loadStates().then(tick);
+setInterval(tick, 2000);
+setInterval(loadStates, 15000);
+</script>
+</body>
+</html>

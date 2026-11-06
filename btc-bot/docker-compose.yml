@@ -1,0 +1,19 @@
+# Runs the paper bot 24/7 with the dashboard on http://localhost:8000
+services:
+  paper-bot:
+    build: .
+    command: ["paper", "--source", "rest", "--candle-seconds", "300", "--poll", "30", "--dashboard", "--host", "0.0.0.0"]
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8000:8000"   # only reachable from this machine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time,sys; s=json.load(open('/app/data/paper_state.json')); sys.exit(time.time()-s['updated_at']>300)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
