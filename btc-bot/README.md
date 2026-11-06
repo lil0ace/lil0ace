@@ -32,8 +32,11 @@ Sonst nichts: keine Shorts, kein Stop-Loss, kein Take-Profit, keine Käufe bei b
 cd btc-bot
 pip install -r requirements.txt
 
-# Backtest: letzte 24 h in 5-min-Kerzen mit 1h-Trendfilter
+# Backtest: letzte 24 h in 5-min-Kerzen mit 1h-Trendfilter (CoinGecko)
 python -m bot backtest
+
+# Backtest über 30 Tage in 5-min-Kerzen (Daten automatisch von Binance)
+python -m bot backtest --days 30 --dashboard
 
 # dasselbe mit Parameter-Raster und Dashboard danach
 python -m bot backtest --sweep --dashboard
@@ -68,13 +71,14 @@ Nur das Dashboard starten: `python -m bot dashboard`. Oben rechts lässt sich zw
 | `--max-drawdown` | 20 | Not-Aus: Bei diesem Verlust vom Höchststand wird verkauft und der Handel gestoppt |
 | `--fraction` | 100 | Anteil des Cash pro Einstieg in % |
 | `--days` / `--interval` | 1 / 300 | Backtest-Zeitraum und Kerzenlänge in Sekunden |
+| `--data` / `--symbol` | `auto` / `BTCUSDT` | Datenquelle für Backtests: `coingecko`, `binance` oder `auto` (Binance bei 5-min-Kerzen über mehr als 1 Tag) |
 | `--source` | `rest` | `rest` (kostenlos) oder `ws` (WebSocket, bezahlt) |
 | `--candle-seconds` | 300 | Signal-Kerzenlänge im Forward-Test |
 | `--reset` | – | gespeichertes Paper-Konto verwerfen |
 
 CoinGecko-Granularität: `--days 1` liefert ~5-Minuten-Daten, 2–90 Tage stündliche, mehr als 90 Tage tägliche Daten.
-**5-Minuten-Backtests gehen mit der kostenlosen API deshalb nur über die letzten 24 Stunden.** Für die 1h-Trendkerzen lädt der Bot automatisch stündliche Daten der letzten Tage nach.
-Ein Tag ist eine sehr kleine Stichprobe. Aussagekräftiger ist der Forward-Test über mehrere Wochen.
+Für längere 5-Minuten-Backtests holt der Bot deshalb automatisch die kostenlosen Kerzen von Binance (`data-api.binance.vision`, kein Key nötig, BTC/USDT).
+Der Live-Forward-Test nutzt weiterhin CoinGecko.
 Die öffentliche API ist stark limitiert. Mit `--poll` unter ~15 s kommen schnell HTTP-429-Antworten; der Bot wartet dann automatisch und versucht es erneut.
 Ein kostenloser **Demo-Key** (`COINGECKO_PLAN=demo`) erhöht das Limit.
 Die REST-Preise aktualisiert CoinGecko nur etwa alle 20–60 s. Für kurze Kerzen ist deshalb die WebSocket-Quelle gedacht.
@@ -116,6 +120,9 @@ Ein einfacher MA-Crossover ist in Seitwärtsphasen anfällig für viele Fehlsign
 - Ohne Trendfilter, 30 Tage (Okt./Nov. 2026, 1h-Kerzen, SMA 9/21): **−14 %**, Buy & Hold **−9 %**.
 - Mit 4h-Trendfilter und Shorts, 5-min-Kerzen, letzte 24 h (06.11.2026): **−4 %** bei 7 Trades (0 Gewinner), Buy & Hold **+0,1 %**.
 - Aktuelle Regeln (1h-Trend, nur Long), dieselben 24 h: **0 Trades, ±0 %**. Der 1h-Trend war den ganzen Tag bärisch, alle 8 Golden Crosses wurden gefiltert.
+- **Aktuelle Regeln, 30 Tage (07.10.–06.11.2026, Binance 5-min):** **−20,2 %**, Buy & Hold **−9,0 %**. 60 Trades, 10 % Gewinner, 1.077 $ Gebühren. Am 25.10. hat der Not-Aus ausgelöst. Ohne Not-Aus wären es −28,9 % bei 98 Trades gewesen.
+  - Ohne Gebühren und Slippage: −4,6 %. Die Signale haben also schon vor Kosten keinen Vorteil, und die Kosten von ~0,3 % pro Runde vervielfachen den Verlust.
+  - Langsamere Einstellungen verlieren weniger: 5-min SMA 30/100 −5,4 % (17 Trades), 1h-Filter EMA 50/200 −8,1 % (21 Trades). Keine Variante war über diese 30 Tage im Plus.
 Bevor echtes Geld ins Spiel kommt:
 
 - Mit `--sweep` prüfen, ob auch *benachbarte* Einstellungen funktionieren, nicht nur die beste Zeile (sonst Overfitting).

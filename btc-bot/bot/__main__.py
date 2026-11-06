@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from .backtest import fetch_history, fetch_trend_history, run_backtest, sweep, write_trades_csv
@@ -78,13 +79,29 @@ def _fmt_pct(v) -> str:
 
 def cmd_backtest(a) -> int:
     s, r, m, tr = _configs(a)
-    client = CoinGeckoClient()
-    candles = fetch_history(client, m, a.days, a.interval)
-    trend_candles = fetch_trend_history(client, m, tr, a.days) if tr.enabled else None
+    source = a.data
+    if source == "auto":
+        source = "binance" if a.interval < 3600 and a.days > 1 else "coingecko"
+    if source == "binance":
+        from .binance import fetch_klines
+        end = time.time()
+        start = end - a.days * 86400
+        print(f"loading {a.symbol} {a.interval}s candles from Binance ...")
+        candles = fetch_klines(a.symbol, a.interval, start, end)
+        trend_candles = None
+        if tr.enabled:
+            warm = (tr.slow + 3) * tr.interval
+            trend_candles = fetch_klines(a.symbol, tr.interval, start - warm, end)
+        market_label = f"{a.symbol} (Binance)"
+    else:
+        client = CoinGeckoClient()
+        candles = fetch_history(client, m, a.days, a.interval)
+        trend_candles = fetch_trend_history(client, m, tr, a.days) if tr.enabled else None
+        market_label = f"{m.coin_id}/{m.vs_currency} (CoinGecko)"
     if len(candles) <= s.slow:
         print(f"only {len(candles)} candles - need more than slow={s.slow}. Use more --days or a shorter --interval.")
         return 1
-    print(f"{len(candles)} candles of {a.interval}s for {m.coin_id}/{m.vs_currency} ({a.days} days)")
+    print(f"{len(candles)} candles of {a.interval}s for {market_label} ({a.days:g} days)")
 
     if a.sweep:
         rows = sweep(candles, s, r, [5, 7, 9, 12, 15, 20], [21, 26, 30, 40, 50, 100], tr, trend_candles, a.interval)
@@ -113,7 +130,8 @@ def cmd_backtest(a) -> int:
         print(f"  KILL SWITCH    {mt['halt_reason']}")
 
     state_path = DATA_DIR / "backtest_state.json"
-    write_json(state_path, engine.to_state(mode="backtest", coin=m.coin_id, vs=m.vs_currency,
+    coin, vs = (a.symbol[:-4], a.symbol[-4:]) if source == "binance" else (m.coin_id, m.vs_currency)
+    write_json(state_path, engine.to_state(mode="backtest", coin=coin, vs=vs, data_source=source,
                                            candle_seconds=a.interval, days=a.days, status="finished"))
     write_trades_csv(engine, DATA_DIR / "backtest_trades.csv")
     print(f"\nsaved {state_path} and backtest_trades.csv")
@@ -181,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--days", type=float, default=1, help="history length (1 day = 5-min data, 2-90 = hourly)")
     b.add_argument("--interval", type=int, default=300, help="candle length in seconds (300 = 5 min)")
     b.add_argument("--sweep", action="store_true", help="also test a grid of fast/slow settings")
+    b.add_argument("--data", choices=["auto", "coingecko", "binance"], default="auto",
+                   help="history source; auto = Binance for sub-hourly candles over more than 1 day")
+    b.add_argument("--symbol", default="BTCUSDT", help="Binance symbol for --data binance")
     b.add_argument("--dashboard", action="store_true", help="open the dashboard afterwards")
 
     pp = sub.add_parser("paper", help="forward test on live prices (paper money)")

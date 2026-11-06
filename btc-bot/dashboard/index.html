@@ -107,12 +107,19 @@ const trendBackground = {
     const { ctx, chartArea: a, scales: { x } } = chart;
     const n = trendBands.length, step = n > 1 ? x.getPixelForValue(1) - x.getPixelForValue(0) : a.width;
     ctx.save();
-    for (let i = 0; i < n; i++) {
+    ctx.beginPath(); ctx.rect(a.left, a.top, a.width, a.height); ctx.clip();
+    // one rectangle per run of equal trend, so translucent fills never stack up
+    let i = 0;
+    while (i < n) {
       const tr = trendBands[i];
-      if (!tr) continue;
-      ctx.fillStyle = tr === 'bull' ? css('--bull-bg') : css('--bear-bg');
-      const left = Math.max(a.left, x.getPixelForValue(i) - step / 2);
-      ctx.fillRect(left, a.top, Math.min(step + 1, a.right - left), a.bottom - a.top);
+      let j = i;
+      while (j + 1 < n && trendBands[j + 1] === tr) j++;
+      if (tr) {
+        ctx.fillStyle = tr === 'bull' ? css('--bull-bg') : css('--bear-bg');
+        const left = x.getPixelForValue(i) - step / 2, right = x.getPixelForValue(j) + step / 2;
+        ctx.fillRect(left, a.top, right - left, a.bottom - a.top);
+      }
+      i = j + 1;
     }
     ctx.restore();
   },
@@ -123,7 +130,8 @@ function makeCharts() {
   const scales = { x: { ticks: { color: muted, maxTicksLimit: 8, autoSkip: true }, grid: { color: grid } },
                    y: { ticks: { color: muted }, grid: { color: grid } } };
   const common = { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false },
-                   plugins: { legend: { labels: { color: muted, boxWidth: 12 } } }, scales };
+                   plugins: { legend: { labels: { color: muted, boxWidth: 12,
+                   filter: (item, data) => (data.datasets[item.datasetIndex].data || []).some(v => v != null) } } }, scales };
   priceChart = new Chart(document.getElementById('priceChart'), { type: 'line', options: common, plugins: [trendBackground], data: { labels: [], datasets: [
     { label: 'Preis', data: [], borderColor: css('--price'), borderWidth: 1.5, pointRadius: 0 },
     { label: 'Schneller MA', data: [], borderColor: css('--fast'), borderWidth: 1.5, pointRadius: 0 },
