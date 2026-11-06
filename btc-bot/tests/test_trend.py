@@ -3,7 +3,7 @@ from bot.candles import Candle
 from bot.config import RiskConfig, StrategyConfig, TrendConfig
 from bot.engine import TradingEngine
 
-TREND = TrendConfig(interval=4 * 3600, fast=2, slow=3, kind="sma")
+TREND = TrendConfig(interval=4 * 3600, fast=2, slow=3, kind="sma", allow_short=True)
 STRAT = StrategyConfig(fast=2, slow=4)
 RISK = RiskConfig(stop_loss_pct=None, max_drawdown_pct=0.9)
 
@@ -78,3 +78,19 @@ def test_backtest_uses_only_closed_trend_candles():
     assert eng.candles[0]["trend"] == "bull"   # 4h candle at 0 not closed yet
     assert eng.candles[1]["trend"] == "bear"   # closes together with it: SMA2 76 < SMA3 84.3
     assert eng.trend.last_close_time == 14400
+
+
+def test_default_rules_long_only_1h_and_death_cross_always_flattens():
+    cfg = TrendConfig(fast=2, slow=3, kind="sma")  # defaults: 1h, no shorts
+    assert cfg.interval == 3600 and not cfg.allow_short
+    e = TradingEngine(STRAT, RiskConfig(), trend_cfg=cfg)
+    assert e.risk.stop_loss_pct is None
+    for i, p in enumerate([100, 101, 102, 103]):
+        e.on_trend_candle(c(i * 3600, p))
+    feed(e, WAVE[:8])
+    assert e.broker.is_long
+    for i, p in enumerate([90, 80]):  # trend turns bearish while long
+        e.on_trend_candle(c((4 + i) * 3600, p))
+    trades = feed(e, WAVE[8:], t0=2 * 10**6)
+    assert [(t.side, t.reason) for t in trades] == [("sell", "death_cross")]  # flattened, no short, no re-entry
+    assert not e.broker.in_position

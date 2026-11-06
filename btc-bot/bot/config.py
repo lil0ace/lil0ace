@@ -23,11 +23,11 @@ class TrendConfig:
     """Higher-timeframe filter. Bullish = fast MA above slow MA on completed trend candles."""
 
     enabled: bool = True
-    interval: int = 4 * 3600   # 4h candles
+    interval: int = 3600       # 1h candles
     fast: int = 9
     slow: int = 21
     kind: str = "ema"
-    allow_short: bool = True   # open shorts on death crosses in a bearish trend
+    allow_short: bool = False  # opt-in: open shorts on death crosses in a bearish trend
 
     def strategy(self) -> StrategyConfig:
         return StrategyConfig(fast=self.fast, slow=self.slow, kind=self.kind)
@@ -45,7 +45,7 @@ class RiskConfig:
     fee_rate: float = 0.001           # 0.1 % per fill, typical spot taker fee
     slippage: float = 0.0005          # 0.05 % worse fill than the signal price
     position_fraction: float = 1.0    # share of cash used per entry
-    stop_loss_pct: float | None = 0.03      # exit if price moves 3 % against the entry
+    stop_loss_pct: float | None = None      # optional: exit if price moves this much against the entry
     take_profit_pct: float | None = None    # optional fixed take-profit (both directions)
     max_drawdown_pct: float = 0.20    # kill switch: stop trading after -20 % from peak equity
 

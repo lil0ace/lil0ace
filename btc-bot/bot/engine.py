@@ -1,10 +1,12 @@
 """Glue between strategy, higher-timeframe trend filter, risk rules and the paper account.
 
-Rules (trend filter enabled, default):
-  4h bullish:  5-min golden cross -> open long;  5-min death cross  -> close long
-  4h bearish:  5-min death cross  -> open short; 5-min golden cross -> close short
-A cross always flattens a position against it, whatever the trend; new entries are only
-taken in the trend's direction. With the filter disabled the bot trades long-only on every cross.
+Default rules:
+  1h trend bullish + 5-min golden cross -> buy (open long)
+  5-min death cross                     -> close the long (whatever the trend)
+  nothing else: no shorts, no stop-loss (only the account kill switch as a safety net)
+
+Optional (--allow-short): in a bearish trend a death cross opens a short and the next
+golden cross closes it. With the filter disabled (--no-trend) every golden cross buys.
 
 Backtest and live paper trading use the very same engine, so forward-test
 results are directly comparable to the backtest.
