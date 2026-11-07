@@ -24,17 +24,21 @@ def _pct_or_none(v: str) -> float | None:
 
 
 def _common(p: argparse.ArgumentParser) -> None:
-    g = p.add_argument_group("strategy")
-    g.add_argument("--fast", type=int, default=9, help="fast moving average length (candles)")
-    g.add_argument("--slow", type=int, default=21, help="slow moving average length (candles)")
+    g = p.add_argument_group("strategy (default: Supertrend 10/3, winner of research/strategy_tournament.py)")
+    g.add_argument("--strategy", choices=["supertrend", "ma"], default="supertrend")
+    g.add_argument("--atr-period", type=int, default=10, help="supertrend ATR length")
+    g.add_argument("--multiplier", type=float, default=3.0, help="supertrend band width in ATRs")
+    g.add_argument("--fast", type=int, default=9, help="ma: fast moving average length (candles)")
+    g.add_argument("--slow", type=int, default=21, help="ma: slow moving average length (candles)")
     g.add_argument("--ma", choices=["sma", "ema"], default="sma")
-    t = p.add_argument_group("higher-timeframe trend filter (default: 1h EMA 9/21)")
+    t = p.add_argument_group("optional higher-timeframe trend filter (off by default)")
+    t.add_argument("--trend", action="store_true", help="only buy while the higher-timeframe EMA trend is bullish")
     t.add_argument("--trend-interval", type=int, default=3600, help="trend candle length in seconds (3600 = 1h)")
     t.add_argument("--trend-fast", type=int, default=9)
     t.add_argument("--trend-slow", type=int, default=21)
     t.add_argument("--trend-ma", choices=["sma", "ema"], default="ema")
-    t.add_argument("--no-trend", action="store_true", help="disable the filter: buy on every golden cross")
-    t.add_argument("--allow-short", action="store_true", help="also short death crosses in a bearish trend (off by default)")
+    t.add_argument("--no-trend", action="store_true", help=argparse.SUPPRESS)  # old flag, filter is off by default now
+    t.add_argument("--allow-short", action="store_true", help="with --trend: also short sell signals in a bearish trend")
     r = p.add_argument_group("paper account & risk")
     r.add_argument("--cash", type=float, default=10_000.0, help="starting paper cash")
     r.add_argument("--fee", type=float, default=0.1, help="fee per fill in %%")
@@ -42,15 +46,16 @@ def _common(p: argparse.ArgumentParser) -> None:
     r.add_argument("--fraction", type=float, default=100.0, help="%% of cash used per entry")
     r.add_argument("--stop-loss", type=_pct_or_none, default=None, help="optional stop loss in %% against the entry (off by default)")
     r.add_argument("--take-profit", type=_pct_or_none, default=None, help="take profit in %% above entry (0 = off)")
-    r.add_argument("--max-drawdown", type=float, default=20.0, help="kill switch: halt after this %% drawdown (100 = off)")
+    r.add_argument("--max-drawdown", type=float, default=50.0, help="kill switch: halt after this %% drawdown (100 = off)")
     m = p.add_argument_group("market")
     m.add_argument("--coin", default="bitcoin", help="CoinGecko coin id")
     m.add_argument("--vs", default="usd", help="quote currency")
 
 
 def _configs(a) -> tuple[StrategyConfig, RiskConfig, MarketConfig, TrendConfig]:
-    s = StrategyConfig(fast=a.fast, slow=a.slow, kind=a.ma)
-    tr = TrendConfig(enabled=not a.no_trend, interval=a.trend_interval, fast=a.trend_fast,
+    s = StrategyConfig(name="supertrend" if a.strategy == "supertrend" else "ma_cross", fast=a.fast,
+                       slow=a.slow, kind=a.ma, atr_period=a.atr_period, multiplier=a.multiplier)
+    tr = TrendConfig(enabled=a.trend and not a.no_trend, interval=a.trend_interval, fast=a.trend_fast,
                      slow=a.trend_slow, kind=a.trend_ma, allow_short=a.allow_short)
     tr.validate()
     r = RiskConfig(
@@ -64,13 +69,16 @@ def _configs(a) -> tuple[StrategyConfig, RiskConfig, MarketConfig, TrendConfig]:
 
 
 def _describe(s: StrategyConfig, tr: TrendConfig) -> str:
-    base = f"{s.kind.upper()} {s.fast}/{s.slow}"
+    if s.name == "supertrend":
+        base = f"Supertrend {s.atr_period}/{s.multiplier:g}"
+    else:
+        base = f"{s.kind.upper()} {s.fast}/{s.slow} crossover"
     if not tr.enabled:
-        return base + " crossover, long only, no trend filter"
+        return base + ", long only, no trend filter"
     h = tr.interval / 3600
     tf = f"{h:g}h" if h >= 1 else f"{tr.interval // 60}min"
     shorts = "long+short" if tr.allow_short else "long only"
-    return f"{base} crossover, {tf} {tr.kind.upper()} {tr.fast}/{tr.slow} trend filter, {shorts}"
+    return f"{base}, {tf} {tr.kind.upper()} {tr.fast}/{tr.slow} trend filter, {shorts}"
 
 
 def _fmt_pct(v) -> str:
@@ -81,7 +89,9 @@ def cmd_backtest(a) -> int:
     s, r, m, tr = _configs(a)
     source = a.data
     if source == "auto":
-        source = "binance" if a.interval < 3600 and a.days > 1 else "coingecko"
+        # CoinGecko (free) granularity: 5 min for 1 day, hourly up to 90 days, daily beyond
+        cg_step = 300 if a.days <= 1 else 3600 if a.days <= 90 else 86400
+        source = "binance" if a.interval < cg_step else "coingecko"
     if source == "binance":
         from .binance import fetch_klines
         end = time.time()
@@ -103,7 +113,9 @@ def cmd_backtest(a) -> int:
         return 1
     print(f"{len(candles)} candles of {a.interval}s for {market_label} ({a.days:g} days)")
 
-    if a.sweep:
+    if a.sweep and s.name != "ma_cross":
+        print("--sweep varies the moving-average lengths and only applies to --strategy ma; skipped")
+    elif a.sweep:
         rows = sweep(candles, s, r, [5, 7, 9, 12, 15, 20], [21, 26, 30, 40, 50, 100], tr, trend_candles, a.interval)
         print(f"\n{'fast':>4} {'slow':>4} {'return':>9} {'buy&hold':>9} {'maxDD':>8} {'trades':>6} {'win%':>6}")
         for row in rows:
@@ -190,24 +202,24 @@ def cmd_dashboard(a) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m bot", description="BTC moving-average crossover paper trading bot")
+    p = argparse.ArgumentParser(prog="python -m bot", description="BTC paper trading bot (Supertrend / MA crossover)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("backtest", help="test the strategy on CoinGecko history")
     _common(b)
-    b.add_argument("--days", type=float, default=1, help="history length (1 day = 5-min data, 2-90 = hourly)")
-    b.add_argument("--interval", type=int, default=300, help="candle length in seconds (300 = 5 min)")
+    b.add_argument("--days", type=float, default=365, help="history length in days")
+    b.add_argument("--interval", type=int, default=14400, help="candle length in seconds (14400 = 4h)")
     b.add_argument("--sweep", action="store_true", help="also test a grid of fast/slow settings")
     b.add_argument("--data", choices=["auto", "coingecko", "binance"], default="auto",
-                   help="history source; auto = Binance for sub-hourly candles over more than 1 day")
+                   help="history source; auto = Binance whenever CoinGecko's free data is too coarse")
     b.add_argument("--symbol", default="BTCUSDT", help="Binance symbol for --data binance")
     b.add_argument("--dashboard", action="store_true", help="open the dashboard afterwards")
 
     pp = sub.add_parser("paper", help="forward test on live prices (paper money)")
     _common(pp)
     pp.add_argument("--source", choices=["rest", "ws"], default="rest")
-    pp.add_argument("--candle-seconds", type=int, default=300, help="signal candle length (300 = 5 min)")
+    pp.add_argument("--candle-seconds", type=int, default=14400, help="signal candle length (14400 = 4h)")
     pp.add_argument("--poll", type=float, default=30.0, help="REST poll interval in seconds")
     pp.add_argument("--name", default="paper", help="name for state/account files")
     pp.add_argument("--reset", action="store_true", help="discard the saved paper account")

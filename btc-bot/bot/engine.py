@@ -1,12 +1,13 @@
 """Glue between strategy, higher-timeframe trend filter, risk rules and the paper account.
 
-Default rules:
-  1h trend bullish + 5-min golden cross -> buy (open long)
-  5-min death cross                     -> close the long (whatever the trend)
-  nothing else: no shorts, no stop-loss (only the account kill switch as a safety net)
+Rules:
+  strategy says "buy"  and the account is flat -> open a long
+  strategy says "sell" and a long is open      -> close it
+  (default strategy: Supertrend 10/3 on 4h candles, which says "buy" while its trend is up)
 
-Optional (--allow-short): in a bearish trend a death cross opens a short and the next
-golden cross closes it. With the filter disabled (--no-trend) every golden cross buys.
+Optional higher-timeframe filter (--trend): new longs only while that trend is bullish;
+with --allow-short a "sell" in a bearish trend opens a short and the next "buy" closes it.
+Protective extras: optional stop-loss / take-profit and an account drawdown kill switch.
 
 Backtest and live paper trading use the very same engine, so forward-test
 results are directly comparable to the backtest.
@@ -20,7 +21,7 @@ from dataclasses import asdict
 from .broker import PaperBroker, Trade
 from .candles import Candle
 from .config import RiskConfig, StrategyConfig, TrendConfig
-from .strategy import MACrossover
+from .strategy import MACrossover, make_strategy
 
 
 class TrendFilter:
@@ -69,7 +70,7 @@ class TradingEngine:
         self.risk = risk_cfg
         self.trend_cfg = trend_cfg or TrendConfig(enabled=False)
         self.trend = TrendFilter(self.trend_cfg)
-        self.strategy = MACrossover(strategy_cfg)
+        self.strategy = make_strategy(strategy_cfg)
         self.broker = broker or PaperBroker(
             starting_cash=risk_cfg.starting_cash,
             fee_rate=risk_cfg.fee_rate,
@@ -94,7 +95,7 @@ class TradingEngine:
 
     def warmup(self, candle: Candle) -> None:
         """Feed history to the moving averages without trading."""
-        self.strategy.update(candle.close)
+        self.strategy.update(candle)
         self._record_candle(candle)
 
     def on_candle(self, candle: Candle) -> list[Trade]:
@@ -103,7 +104,8 @@ class TradingEngine:
             self.first_price = price
         self.candle_count += 1
         trades: list[Trade | None] = []
-        signal = self.strategy.update(price)
+        signal = self.strategy.update(candle)
+        enter, leave = self.strategy.entry_reason, self.strategy.exit_reason
         trend = self.trend.state
         b = self.broker
 
@@ -118,19 +120,19 @@ class TradingEngine:
 
         # 2) signal exits: a cross against the position flattens it
         if signal == "sell" and b.is_long:
-            trades.append(b.close(price, t, "death_cross", trend))
+            trades.append(b.close(price, t, leave, trend))
         elif signal == "buy" and b.is_short:
-            trades.append(b.close(price, t, "golden_cross", trend))
+            trades.append(b.close(price, t, enter, trend))
 
         # 3) entries, only in the direction of the higher-timeframe trend
         if not self.halted and not b.in_position:
             if not self.trend_cfg.enabled:
                 if signal == "buy":
-                    trades.append(b.buy(price, t, "golden_cross"))
+                    trades.append(b.buy(price, t, enter))
             elif signal == "buy" and trend == "bull":
-                trades.append(b.buy(price, t, "golden_cross", trend))
+                trades.append(b.buy(price, t, enter, trend))
             elif signal == "sell" and trend == "bear" and self.trend_cfg.allow_short:
-                trades.append(b.short(price, t, "death_cross", trend))
+                trades.append(b.short(price, t, leave, trend))
 
         # 4) account-level kill switch
         equity = b.equity(price)
@@ -155,7 +157,7 @@ class TradingEngine:
     def _record_candle(self, candle: Candle, signal: str | None = None, trend: str | None = None) -> None:
         self.candles.append({
             "t": candle.start, "o": candle.open, "h": candle.high, "l": candle.low, "c": candle.close,
-            "fast": self.strategy.fast, "slow": self.strategy.slow, "signal": signal, "trend": trend,
+            **self.strategy.lines(), "signal": signal, "trend": trend,
         })
 
     # -- reporting ----------------------------------------------------------

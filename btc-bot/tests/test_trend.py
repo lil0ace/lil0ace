@@ -3,7 +3,7 @@ from bot.candles import Candle
 from bot.config import RiskConfig, StrategyConfig, TrendConfig
 from bot.engine import TradingEngine
 
-TREND = TrendConfig(interval=4 * 3600, fast=2, slow=3, kind="sma", allow_short=True)
+TREND = TrendConfig(enabled=True, interval=4 * 3600, fast=2, slow=3, kind="sma", allow_short=True)
 STRAT = StrategyConfig(fast=2, slow=4)
 RISK = RiskConfig(stop_loss_pct=None, max_drawdown_pct=0.9)
 
@@ -47,7 +47,7 @@ def test_bear_trend_shorts_only_and_flattens_on_golden_cross():
 
 
 def test_no_short_option_stays_flat_in_bear_trend():
-    e = TradingEngine(STRAT, RISK, trend_cfg=TrendConfig(interval=TREND.interval, fast=2, slow=3, kind="sma", allow_short=False))
+    e = TradingEngine(STRAT, RISK, trend_cfg=TrendConfig(enabled=True, interval=TREND.interval, fast=2, slow=3, kind="sma", allow_short=False))
     for i, p in enumerate([103, 102, 101, 100]):
         e.on_trend_candle(c(i * TREND.interval, p))
     assert feed(e, WAVE) == []
@@ -81,9 +81,9 @@ def test_backtest_uses_only_closed_trend_candles():
 
 
 def test_default_rules_long_only_1h_and_death_cross_always_flattens():
-    cfg = TrendConfig(fast=2, slow=3, kind="sma")  # defaults: 1h, no shorts
+    cfg = TrendConfig(enabled=True, fast=2, slow=3, kind="sma")  # defaults: 1h, no shorts
     assert cfg.interval == 3600 and not cfg.allow_short
-    e = TradingEngine(STRAT, RiskConfig(), trend_cfg=cfg)
+    e = TradingEngine(STRAT, RiskConfig(max_drawdown_pct=0.9), trend_cfg=cfg)
     assert e.risk.stop_loss_pct is None
     for i, p in enumerate([100, 101, 102, 103]):
         e.on_trend_candle(c(i * 3600, p))

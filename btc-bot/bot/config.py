@@ -7,11 +7,20 @@ from dataclasses import dataclass
 
 @dataclass
 class StrategyConfig:
-    fast: int = 9
-    slow: int = 21
-    kind: str = "sma"  # "sma" or "ema"
+    fast: int = 9            # ma_cross: fast moving average length
+    slow: int = 21           # ma_cross: slow moving average length
+    kind: str = "sma"        # ma_cross: "sma" or "ema"
+    name: str = "ma_cross"   # "ma_cross" or "supertrend"
+    atr_period: int = 10     # supertrend: ATR length
+    multiplier: float = 3.0  # supertrend: band width in ATRs
 
     def validate(self) -> None:
+        if self.name == "supertrend":
+            if self.atr_period < 1 or self.multiplier <= 0:
+                raise ValueError("supertrend needs atr_period >= 1 and multiplier > 0")
+            return
+        if self.name != "ma_cross":
+            raise ValueError(f"unknown strategy {self.name!r}")
         if self.kind not in ("sma", "ema"):
             raise ValueError(f"unknown moving average kind: {self.kind!r}")
         if not (1 <= self.fast < self.slow):
@@ -22,7 +31,7 @@ class StrategyConfig:
 class TrendConfig:
     """Higher-timeframe filter. Bullish = fast MA above slow MA on completed trend candles."""
 
-    enabled: bool = True
+    enabled: bool = False      # opt-in (--trend)
     interval: int = 3600       # 1h candles
     fast: int = 9
     slow: int = 21
@@ -30,7 +39,7 @@ class TrendConfig:
     allow_short: bool = False  # opt-in: open shorts on death crosses in a bearish trend
 
     def strategy(self) -> StrategyConfig:
-        return StrategyConfig(fast=self.fast, slow=self.slow, kind=self.kind)
+        return StrategyConfig(name="ma_cross", fast=self.fast, slow=self.slow, kind=self.kind)
 
     def validate(self) -> None:
         if self.enabled:
@@ -47,7 +56,8 @@ class RiskConfig:
     position_fraction: float = 1.0    # share of cash used per entry
     stop_loss_pct: float | None = None      # optional: exit if price moves this much against the entry
     take_profit_pct: float | None = None    # optional fixed take-profit (both directions)
-    max_drawdown_pct: float = 0.20    # kill switch: stop trading after -20 % from peak equity
+    max_drawdown_pct: float = 0.50    # kill switch: stop trading after -50 % from peak equity
+                                      # (beyond the worst backtest drawdown of the default strategy)
 
     def validate(self) -> None:
         if self.starting_cash <= 0:
@@ -69,3 +79,4 @@ class RiskConfig:
 class MarketConfig:
     coin_id: str = "bitcoin"
     vs_currency: str = "usd"
+    binance_symbol: str = "BTCUSDT"  # only used for history/warm-up candles

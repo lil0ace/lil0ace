@@ -77,8 +77,19 @@ class PaperTrader:
                      len(candles), tcfg.interval, self.engine.trend.state or "unknown")
 
         if self.agg.seconds < 300:
-            log.info("no warm-up for %ss candles; waiting for %d live candles", self.agg.seconds, self.engine.strategy_cfg.slow)
+            log.info("no warm-up for %ss candles; waiting for enough live candles", self.agg.seconds)
             return
+        # Prefer real OHLC candles from Binance (Supertrend needs true highs/lows); fall back to CoinGecko.
+        try:
+            from .binance import INTERVALS, fetch_klines
+            if self.agg.seconds in INTERVALS and self.market.binance_symbol:
+                candles = fetch_klines(self.market.binance_symbol, self.agg.seconds, now - 250 * self.agg.seconds, now)
+                for c in candles:
+                    self.engine.warmup(c)
+                log.info("warm-up with %d Binance candles done", len(candles))
+                return
+        except Exception as exc:  # network, unknown symbol, ...
+            log.warning("Binance warm-up failed (%s), using CoinGecko", exc)
         days = 1 if self.agg.seconds < 3600 else 30
         points = client.market_chart(self.market.coin_id, self.market.vs_currency, days)
         candles = resample(points, self.agg.seconds)

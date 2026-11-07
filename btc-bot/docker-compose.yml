@@ -2,7 +2,7 @@
 services:
   paper-bot:
     build: .
-    command: ["paper", "--source", "rest", "--candle-seconds", "300", "--poll", "30", "--dashboard", "--host", "0.0.0.0"]
+    command: ["paper", "--source", "rest", "--poll", "30", "--dashboard", "--host", "0.0.0.0"]  # Supertrend 10/3 on 4h candles
     env_file:
       - path: .env
         required: false

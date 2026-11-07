@@ -20,10 +20,11 @@ def _completed(candles: list[Candle], interval: int, now: float | None = None) -
 
 
 def fetch_history(client: CoinGeckoClient, market: MarketConfig, days: float, interval: int) -> list[Candle]:
-    if interval < 3600 and days > 1:
+    step = 300 if days <= 1 else 3600 if days <= 90 else 86400
+    if interval < step:
         raise ValueError(
-            "CoinGecko only returns 5-minute data for the last 24 hours (days 2-90 are hourly). "
-            "Use --days 1 for 5-minute candles."
+            f"CoinGecko's free data for {days:g} days is only {step // 60}-minute granular, too coarse for "
+            f"{interval}s candles. Use --data binance (or --data auto)."
         )
     points = client.market_chart(market.coin_id, market.vs_currency, days)
     return _completed(resample(points, interval), interval)

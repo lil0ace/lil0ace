@@ -68,7 +68,7 @@
 
   <section class="panel">
     <h2 id="priceTitle">Preis &amp; gleitende Durchschnitte</h2>
-    <p class="note">Hintergrund: grün = Trend bullisch (Golden Cross wird gekauft), rot = Trend bärisch (keine neuen Käufe).</p>
+    <p class="note" id="bandNote" hidden>Hintergrund: grün = Trend bullisch (Käufe erlaubt), rot = Trend bärisch (keine neuen Käufe).</p>
     <div class="chart"><canvas id="priceChart" aria-label="Preischart mit gleitenden Durchschnitten und Trades"></canvas></div>
   </section>
   <section class="panel">
@@ -153,14 +153,23 @@ function render(s) {
   st.className = 'badge ' + (m.halted || s.last_error ? 'bad' : (s.status === 'running' || s.status === 'finished' ? 'ok' : ''));
   const sc = s.strategy || {}, tf = s.trend_filter || {};
   const tfName = tf.interval ? (tf.interval >= 3600 ? (tf.interval / 3600) + 'h' : (tf.interval / 60) + 'min') : '';
-  const candleName = s.candle_seconds >= 60 ? (s.candle_seconds / 60) + 'min' : s.candle_seconds + 's';
+  const candleName = s.candle_seconds >= 3600 ? (s.candle_seconds / 3600) + 'h' : s.candle_seconds >= 60 ? (s.candle_seconds / 60) + 'min' : s.candle_seconds + 's';
   document.getElementById('priceTitle').textContent =
-    `${(s.coin || '').toUpperCase()}/${(s.vs || '').toUpperCase()} · ${candleName}-Kerzen ${sc.kind?.toUpperCase()} ${sc.fast}/${sc.slow}` +
+    `${(s.coin || '').toUpperCase()}/${(s.vs || '').toUpperCase()} · ${candleName}-Kerzen · ` +
+    (sc.name === 'supertrend' ? `Supertrend ${sc.atr_period}/${sc.multiplier}` : `${sc.kind?.toUpperCase()} ${sc.fast}/${sc.slow}`) +
     (tf.enabled ? ` · Trendfilter ${tfName} ${tf.kind?.toUpperCase()} ${tf.fast}/${tf.slow}${tf.allow_short ? '' : ' (ohne Shorts)'}` : ' · ohne Trendfilter');
-  document.getElementById('trendLabel').textContent = (tfName || '4h') + '-Trend';
-  const trEl = document.getElementById('trend');
-  trEl.textContent = tf.enabled ? (TREND[m.trend] || 'unbekannt') : 'aus';
-  cls(trEl, m.trend === 'bull' ? 1 : m.trend === 'bear' ? -1 : 0);
+  const trEl = document.getElementById('trend'), trTile = trEl.parentElement;
+  const lastSig = [...(s.candles || [])].reverse().find(c => c.signal)?.signal;
+  if (tf.enabled) {
+    document.getElementById('trendLabel').textContent = tfName + '-Trend';
+    trEl.textContent = TREND[m.trend] || 'unbekannt';
+    cls(trEl, m.trend === 'bull' ? 1 : m.trend === 'bear' ? -1 : 0);
+  } else if (sc.name === 'supertrend') {
+    document.getElementById('trendLabel').textContent = 'Supertrend';
+    trEl.textContent = lastSig === 'buy' ? 'aufwärts' : lastSig === 'sell' ? 'abwärts' : '–';
+    cls(trEl, lastSig === 'buy' ? 1 : lastSig === 'sell' ? -1 : 0);
+  }
+  trTile.hidden = !tf.enabled && sc.name !== 'supertrend';
   const meta = [];
   if (s.source) meta.push('Quelle: ' + (s.source === 'ws' ? 'CoinGecko WebSocket' : 'CoinGecko REST'));
   if (s.updated_at) meta.push('aktualisiert ' + fmtTime(s.updated_at));
@@ -187,8 +196,12 @@ function render(s) {
     (t.side === 'buy' ? longs : t.side === 'short' ? shorts : closes)[i] = t.price;
   }
   trendBands = candles.map(c => c.trend || null);
+  document.getElementById('bandNote').hidden = !tf.enabled;
   priceChart.data.labels = candles.map(c => fmtTime(c.t));
   priceChart.data.datasets[0].data = candles.map(c => c.c);
+  const isST = sc.name === 'supertrend';
+  priceChart.data.datasets[1].label = isST ? 'Supertrend' : 'Schneller MA';
+  priceChart.data.datasets[2].label = 'Langsamer MA';
   priceChart.data.datasets[1].data = candles.map(c => c.fast);
   priceChart.data.datasets[2].data = candles.map(c => c.slow);
   priceChart.data.datasets[3].data = longs;
